@@ -1,6 +1,6 @@
 import pytest
 
-from chainroute.loader import ChainConfigError, load_chain
+from chainroute.loader import ChainConfigError, load_chain, read_chain_mode
 
 
 def write(tmp_path, name, content):
@@ -77,3 +77,34 @@ plugins:
 """)
     names = [p.name for p in load_chain(str(f))]
     assert names == ["KeywordRoute", "StickySession", "TagAffinity"]
+
+
+def test_per_plugin_timeout_is_read_from_the_entry(tmp_path):
+    f = write(tmp_path, "chain.yaml", """
+plugins:
+  - use: chainroute.plugins.sticky_session.StickySession
+    timeout_s: 0.5
+  - use: chainroute.plugins.tag_affinity.TagAffinity
+""")
+    sticky, tag = load_chain(str(f))
+    assert sticky._chainroute_timeout_s == 0.5
+    assert not hasattr(tag, "_chainroute_timeout_s")
+
+
+def test_read_chain_mode_defaults_to_enforce(tmp_path):
+    f = write(tmp_path, "chain.yaml", "plugins:\n  - use: chainroute.plugins.sticky_session.StickySession\n")
+    assert read_chain_mode(str(f)) == "enforce"
+
+
+def test_read_chain_mode_reads_shadow(tmp_path):
+    f = write(tmp_path, "chain.yaml", "mode: shadow\nplugins: []\n")
+    assert read_chain_mode(str(f)) == "shadow"
+
+
+def test_read_chain_mode_falls_back_on_a_bad_value(tmp_path):
+    f = write(tmp_path, "chain.yaml", "mode: sideways\nplugins: []\n")
+    assert read_chain_mode(str(f)) == "enforce"
+
+
+def test_read_chain_mode_falls_back_when_file_is_missing(tmp_path):
+    assert read_chain_mode(str(tmp_path / "nope.yaml")) == "enforce"

@@ -1,8 +1,11 @@
 """Turns a chain.yaml into a list of configured `RoutingPlugin` instances.
 
+    mode: enforce   # or "shadow": compute and log every plugin's verdict, but enforce none of
+                    # them -- see chain.py. CHAINROUTE_MODE overrides this at deploy time.
     plugins:
       - use: chainroute.plugins.sticky_session.StickySession
       - use: chainroute.plugins.keyword.KeywordRoute
+        timeout_s: 0.5   # optional; overrides the chain's default timeout for this plugin only
         with:
           rules:
             - match: "urgent|asap"
@@ -87,8 +90,23 @@ def load_chain(path: str) -> List[RoutingPlugin]:
         instance.configure(**(entry.get("with") or {}))
         if instance.name is None:
             instance.name = cls.__name__
+        if "timeout_s" in entry:
+            instance._chainroute_timeout_s = float(entry["timeout_s"])  # read by Chain; overrides the chain default
         plugins.append(instance)
     return plugins
+
+
+def read_chain_mode(path: str, default: str = "enforce") -> str:
+    """Reads chain.yaml's top-level `mode:` (enforce|shadow), separately from `load_chain` so a
+    YAML problem here can't also block loading the plugins themselves. Forgiving by design: any
+    problem (missing file, bad YAML, unset key) just falls back to `default`, since a chain that
+    fails to load will already have logged that error loudly elsewhere."""
+    try:
+        doc = yaml.safe_load(Path(path).read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        return default
+    mode = doc.get("mode", default)
+    return mode if mode in ("enforce", "shadow") else default
 
 
 def default_chain_path() -> str:

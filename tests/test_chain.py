@@ -111,6 +111,70 @@ def test_veto_propagates_out_of_apply():
         run(Chain([Rejects()]), ctx(), [dep("a")])
 
 
+def test_shadow_mode_computes_but_does_not_enforce_exclude():
+    deployments = [dep("a"), dep("b")]
+    out = run(Chain([Exclude("a")], mode="shadow"), ctx(), deployments)
+    assert out is deployments  # untouched, despite Exclude having run
+
+
+def test_shadow_mode_computes_but_does_not_enforce_pin():
+    deployments = [dep("a"), dep("b")]
+    out = run(Chain([Bias("b", 5.0), Pin("a")], mode="shadow"), ctx(), deployments)
+    assert out is deployments
+
+
+def test_shadow_mode_logs_but_does_not_raise_veto():
+    out = run(Chain([Rejects()], mode="shadow"), ctx(), [dep("a")])
+    assert [d["model_info"]["id"] for d in out] == ["a"]
+
+
+def test_shadow_mode_still_isolates_a_broken_plugin():
+    out = run(Chain([Explode()], mode="shadow"), ctx(), [dep("a"), dep("b")])
+    assert {d["model_info"]["id"] for d in out} == {"a", "b"}
+
+
+def test_invalid_mode_is_rejected():
+    with pytest.raises(ValueError):
+        Chain([], mode="sideways")
+
+
+def test_slow_plugin_is_skipped_like_a_broken_one():
+    class Slow(RoutingPlugin):
+        name = "Slow"
+
+        async def apply(self, c, candidates):
+            await asyncio.sleep(10)
+
+    out = run(Chain([Slow(), Exclude("a")], default_timeout_s=0.05), ctx(), [dep("a"), dep("b")])
+    assert [d["model_info"]["id"] for d in out] == ["b"]
+
+
+def test_per_plugin_timeout_overrides_the_chain_default():
+    class Slow(RoutingPlugin):
+        name = "Slow"
+
+        async def apply(self, c, candidates):
+            await asyncio.sleep(0.05)
+            c.pin(candidates[0], "made it in time")
+
+    slow = Slow()
+    slow._chainroute_timeout_s = 1.0  # generous override; the chain default below would kill it
+    out = run(Chain([slow], default_timeout_s=0.01), ctx(), [dep("a"), dep("b")])
+    assert [d["model_info"]["id"] for d in out] == ["a"]
+
+
+def test_a_slow_veto_still_gets_skipped_not_enforced():
+    class SlowVeto(RoutingPlugin):
+        name = "SlowVeto"
+
+        async def apply(self, c, candidates):
+            await asyncio.sleep(10)
+            raise Veto("too slow to matter")
+
+    out = run(Chain([SlowVeto()], default_timeout_s=0.05), ctx(), [dep("a")])
+    assert [d["model_info"]["id"] for d in out] == ["a"]
+
+
 def test_on_success_and_on_failure_reach_every_plugin():
     calls = []
 

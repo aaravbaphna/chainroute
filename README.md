@@ -39,6 +39,46 @@ plugins:
 restart anything — it loads every plugin and cross-checks anything KeywordRoute references
 against the deployments you've actually configured.
 
+## Shadow mode
+
+Before a new plugin or chain can affect real traffic, you can run it in shadow mode: every
+plugin still runs and its verdict is still computed and logged, but the *original* deployment
+list is what actually goes back to LiteLLM — nothing is enforced, and a would-be `Veto` is
+logged instead of raised.
+
+```yaml
+# chain.yaml
+mode: shadow
+plugins:
+  - use: plugins.MyNewPlugin
+```
+
+Flip it at deploy time without touching the file, with `CHAINROUTE_MODE=shadow` (or `=enforce`)
+as an environment variable — this takes precedence over `chain.yaml`'s `mode:`, so you can turn
+enforcement on or off the same way you'd flip any other feature flag. Watch for lines starting
+`chainroute[shadow]:` in the proxy's logs to see what each plugin *would* have done.
+
+## Timeouts
+
+Every plugin hook runs under a timeout (2 seconds by default) — a plugin that hangs is treated
+exactly like one that raises: logged, skipped for that request, never left to block a response
+indefinitely. This matters most for a plugin that calls out to a real API (a moderation
+endpoint, say); override the default per chain, or per plugin:
+
+```python
+ChainRoute(plugins=[...], default_timeout_s=5.0)   # SDK: the whole chain's default
+```
+
+```yaml
+# chain.yaml: override for one plugin only
+plugins:
+  - use: plugins.CallsAModerationAPI
+    timeout_s: 0.8
+```
+
+Or set `CHAINROUTE_DEFAULT_TIMEOUT_S` as an environment variable to change the chain-wide default
+without touching `chain.yaml`.
+
 ## Built-in plugins
 
 Run `chainroute list` for the live list with descriptions. As of this writing:
@@ -102,9 +142,10 @@ your `model_list`) — it can't send a request to a different group. LiteLLM has
 for that outside its own built-in semantic/complexity auto-routers; put the deployments you want
 to choose between under one `model_name` and pin between them (see `KeywordRoute`).
 
-**Isolation**: a plugin that raises is logged and skipped for that request — one broken plugin
-degrades to "did nothing," never to "took the proxy down." `Veto` is the one exception that's
-allowed through, since raising it is how a plugin says the request must stop.
+**Isolation**: a plugin that raises — or runs past its timeout, see below — is logged and
+skipped for that request; one broken or slow plugin degrades to "did nothing," never to "took
+the proxy down" or "added unbounded latency." `Veto` is the one exception that's allowed
+through in enforce mode, since raising it is how a plugin says the request must stop.
 
 ## Using the SDK `Router` directly (no proxy)
 
