@@ -11,6 +11,7 @@ chain.py's merge rule) — with an empty chain.yaml, it is a byte-for-byte no-op
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -18,28 +19,40 @@ from typing import Any, Dict, List, Optional
 import litellm
 from litellm.integrations.custom_logger import CustomLogger
 
-from .chain import Chain
-from .loader import ChainConfigError, default_chain_path, load_chain
+from .chain import DEFAULT_TIMEOUT_S, Chain
+from .loader import ChainConfigError, default_chain_path, load_chain, read_chain_mode
 from .types import RouteContext, Veto
 
 log = logging.getLogger("chainroute")
 
 
 class ChainRoute(CustomLogger):
-    def __init__(self, chain_path: Optional[str] = None, plugins: Optional[list] = None) -> None:
+    def __init__(self, chain_path: Optional[str] = None, plugins: Optional[list] = None,
+                 mode: Optional[str] = None, default_timeout_s: Optional[float] = None) -> None:
         super().__init__()
+        # CHAINROUTE_MODE is the operational override: flip enforce/shadow via a deploy's env
+        # vars, no config file edit needed. Explicit `mode=` (SDK use) wins over that; a
+        # chain.yaml `mode:` key is the checked-in default when neither is set.
+        env_mode = os.environ.get("CHAINROUTE_MODE")
+        env_timeout = os.environ.get("CHAINROUTE_DEFAULT_TIMEOUT_S")
+        timeout = default_timeout_s if default_timeout_s is not None else (
+            float(env_timeout) if env_timeout else DEFAULT_TIMEOUT_S)
+
         if plugins is not None:
-            self.chain = Chain(plugins)  # SDK users: pass instances directly, skip the YAML
+            # SDK users: pass instances directly, skip the YAML.
+            self.chain = Chain(plugins, mode=mode or env_mode or "enforce", default_timeout_s=timeout)
         else:
             self.chain_path = chain_path or default_chain_path()
+            resolved_mode = mode or env_mode or read_chain_mode(self.chain_path)
             try:
-                self.chain = Chain(load_chain(self.chain_path))
-                log.warning("chainroute: loaded %d plugin(s) from %s", len(self.chain.plugins), self.chain_path)
+                self.chain = Chain(load_chain(self.chain_path), mode=resolved_mode, default_timeout_s=timeout)
+                log.warning("chainroute: loaded %d plugin(s) from %s (mode=%s)",
+                            len(self.chain.plugins), self.chain_path, resolved_mode)
             except ChainConfigError as e:
                 # Fail loudly at startup (this is a config typo, the kind you want to catch in
                 # CI), but never take the proxy down for it: fall back to an empty, no-op chain.
                 log.error("chainroute: %s -- routing continues WITHOUT any plugins", e)
-                self.chain = Chain([])
+                self.chain = Chain([], mode=resolved_mode, default_timeout_s=timeout)
         self._pending: List[Dict[str, Any]] = []  # decisions awaiting their outcome, oldest first
 
     # ------------------------------------------------------------------ request-id stamping

@@ -34,8 +34,9 @@ def lens_factory():
 
     saved = litellm.callbacks
 
-    def make(plugins):
-        cr = ChainRoute(plugins=plugins)
+    def make(plugins, mode="enforce", default_timeout_s=None):
+        kw = {"default_timeout_s": default_timeout_s} if default_timeout_s is not None else {}
+        cr = ChainRoute(plugins=plugins, mode=mode, **kw)
         litellm.callbacks = [cr]
         return cr
 
@@ -169,4 +170,58 @@ def test_a_plugin_that_always_raises_never_breaks_the_request(lens_factory):
     async def go():
         return await r.acompletion(model="chat", messages=[{"role": "user", "content": "hi"}])
     resp = asyncio.run(go())
+    assert resp.model == "ok"
+
+
+def test_shadow_mode_lets_a_would_be_veto_through_end_to_end(lens_factory):
+    lens_factory([SensitiveDataGuard()], mode="shadow")
+    litellm.callbacks[0].chain.plugins[0].configure(trusted_providers=["azure"], on_match="veto")
+    r = Router(model_list=[
+        {"model_name": "chat", "litellm_params": {"model": "openai/normal", "api_key": "x", "mock_response": "n"}},
+    ])
+
+    async def go():
+        return await r.acompletion(model="chat", messages=[{"role": "user", "content": "my ssn is 123-45-6789"}])
+    # enforce mode raises for this exact request (see test_sensitive_data_guard_vetoes_end_to_end);
+    # shadow mode computes the same veto but must not act on it.
+    resp = asyncio.run(go())
+    assert resp.model == "normal"
+
+
+def test_shadow_mode_lets_an_exclude_through_end_to_end(lens_factory):
+    class ExcludeMini(RoutingPlugin):
+        name = "ExcludeMini"
+
+        async def apply(self, ctx, candidates):
+            for c in candidates:
+                if c.model == "mini":
+                    c.exclude("shadow test")
+
+    lens_factory([ExcludeMini()], mode="shadow")
+    r = Router(model_list=[
+        {"model_name": "chat", "litellm_params": {"model": "openai/mini", "api_key": "x", "mock_response": "m"}},
+    ])
+
+    async def go():
+        return await r.acompletion(model="chat", messages=[{"role": "user", "content": "hi"}])
+    resp = asyncio.run(go())
+    assert resp.model == "mini"  # would have been excluded in enforce mode; shadow mode let it through
+
+
+def test_a_hung_plugin_does_not_block_the_request_end_to_end(lens_factory):
+    class Hangs(RoutingPlugin):
+        name = "Hangs"
+
+        async def apply(self, ctx, candidates):
+            await asyncio.sleep(10)
+
+    lens_factory([Hangs()], default_timeout_s=0.05)
+    r = Router(model_list=[
+        {"model_name": "chat", "litellm_params": {"model": "openai/ok", "api_key": "x", "mock_response": "ok"}},
+    ])
+
+    async def go():
+        return await asyncio.wait_for(
+            r.acompletion(model="chat", messages=[{"role": "user", "content": "hi"}]), timeout=2.0)
+    resp = asyncio.run(go())  # would time out at 2s (the outer wait_for) if the 10s sleep weren't bounded
     assert resp.model == "ok"
