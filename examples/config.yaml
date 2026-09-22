@@ -1,0 +1,25 @@
+# Example LiteLLM proxy config with ChainRoute installed.
+#
+#   pip install chainroute
+#   chainroute install --config examples/config.yaml --patch
+#   CHAINROUTE_CHAIN=examples/chain.yaml litellm --config examples/config.yaml
+#
+# `chainroute install` is what writes chainroute_callback.py and the
+# `callbacks: chainroute_callback.instance` line below -- it's checked in here already so this
+# file runs as-is if you just want to see it work.
+
+model_list:
+  - model_name: chat
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: chat
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+router_settings:
+  routing_strategy: simple-shuffle
+
+litellm_settings:
+  callbacks: chainroute_callback.instance

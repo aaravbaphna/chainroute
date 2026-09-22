@@ -1,0 +1,16 @@
+# Paired with config.yaml: "chat" has two deployments, gpt-4o-mini and claude-sonnet-4-5.
+plugins:
+  # Keep every turn of one conversation on the deployment that handled its first turn.
+  - use: chainroute.plugins.sticky_session.StickySession
+
+  # A message that looks urgent gets the stronger model, within the same group.
+  - use: chainroute.plugins.keyword.KeywordRoute
+    with:
+      rules:
+        - match: "urgent|production is down|sev1"
+          prefer_model: claude-sonnet-4-5
+
+  # A custom plugin, no packaging required -- see plugins.py next to this file.
+  - use: plugins.BusinessHours
+    with:
+      cheap_model: gpt-4o-mini

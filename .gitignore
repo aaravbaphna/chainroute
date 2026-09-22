@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.DS_Store
+/chainroute_callback.py
+/chain.yaml
+/plugins.py
+config.yaml.bak
+!/examples/chainroute_callback.py
+!/examples/chain.yaml
+!/examples/plugins.py

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chainroute"
+version = "0.1.0"
+description = "A plugin chain for LiteLLM's routing decisions: small, composable rules that decide (or veto, or bias) which deployment handles a request."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Aarav Baphna" }]
+keywords = ["litellm", "llm", "routing", "plugins", "middleware", "proxy"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = ["litellm", "pyyaml"]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+
+[project.urls]
+Homepage = "https://github.com/aaravbaphna/chainroute"
+Issues = "https://github.com/aaravbaphna/chainroute/issues"
+
+[project.scripts]
+chainroute = "chainroute.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
