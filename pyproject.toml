@@ -18,10 +18,10 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dependencies = ["litellm", "pyyaml"]
+dependencies = ["litellm", "pyyaml", "httpx"]
 
 [project.optional-dependencies]
-dev = ["pytest", "httpx"]
+dev = ["pytest"]
 
 [project.urls]
 Homepage = "https://github.com/aaravbaphna/chainroute"

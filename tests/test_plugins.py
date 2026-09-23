@@ -6,6 +6,7 @@ import pytest
 from chainroute.plugins.budget_guard import BudgetGuard
 from chainroute.plugins.canary import WeightedCanary
 from chainroute.plugins.keyword import KeywordRoute
+from chainroute.plugins.moderation import ModerationGuard
 from chainroute.plugins.sensitive_data import SensitiveDataGuard
 from chainroute.plugins.sticky_session import StickySession
 from chainroute.plugins.tag_affinity import TagAffinity
@@ -222,3 +223,125 @@ def test_sensitive_guard_vetoes_when_nothing_trusted_is_eligible():
 def test_sensitive_guard_rejects_bad_on_match_value():
     with pytest.raises(ValueError):
         SensitiveDataGuard().configure(on_match="nope")
+
+
+# ---------------------------------------------------------------- ModerationGuard
+def _guard(**kw):
+    g = ModerationGuard()
+    g.configure(api_key="test-key", **kw)
+    return g
+
+
+def _async(value):
+    async def f(text):
+        return value
+    return f
+
+
+def test_moderation_guard_noop_without_an_api_key(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)  # don't let a real dev/CI env var pass this
+    g = ModerationGuard()
+    g.configure()
+    candidates = cands(dep("a", provider="openai"))
+    calls = []
+    g._call_api = lambda text: calls.append(text)  # would raise if actually awaited -- must not be called
+    run(g.apply(ctx(messages=[{"role": "user", "content": "hello"}]), candidates))
+    assert not candidates[0].excluded and calls == []
+
+
+def test_moderation_guard_passthrough_when_not_flagged():
+    g = _guard(trusted_providers=["azure"])
+    g._call_api = _async(False)
+    candidates = cands(dep("a", provider="openai"))
+    run(g.apply(ctx(messages=[{"role": "user", "content": "hello"}]), candidates))
+    assert not candidates[0].excluded
+
+
+def test_moderation_guard_excludes_untrusted_when_flagged():
+    g = _guard(trusted_providers=["azure"], on_match="exclude")
+    g._call_api = _async(True)
+    candidates = cands(dep("a", provider="openai"), dep("b", provider="azure"))
+    run(g.apply(ctx(messages=[{"role": "user", "content": "bad stuff"}]), candidates))
+    assert candidates[0].excluded and not candidates[1].excluded
+
+
+def test_moderation_guard_vetoes_when_nothing_trusted_is_eligible():
+    g = _guard(trusted_providers=["azure"], on_match="veto")
+    g._call_api = _async(True)
+    candidates = cands(dep("a", provider="openai"))
+    with pytest.raises(Veto):
+        run(g.apply(ctx(messages=[{"role": "user", "content": "bad stuff"}]), candidates))
+
+
+def test_moderation_guard_caches_identical_text():
+    g = _guard()
+    calls = []
+
+    async def fake_call(text):
+        calls.append(text)
+        return False
+    g._call_api = fake_call
+    context = ctx(messages=[{"role": "user", "content": "same message"}])
+    run(g.apply(context, cands(dep("a"))))
+    run(g.apply(context, cands(dep("a"))))
+    assert calls == ["same message"]  # second call was served from cache
+
+
+def test_moderation_guard_fails_open_by_default():
+    g = _guard(on_match="veto")
+
+    async def boom(text):
+        raise RuntimeError("api is down")
+    g._call_api = boom
+    candidates = cands(dep("a"))
+    with pytest.raises(RuntimeError):
+        # ModerationGuard itself doesn't swallow this -- Chain's own isolation (see chain.py) is
+        # what actually makes this fail open in a real chain; this test documents that contract.
+        run(g.apply(ctx(messages=[{"role": "user", "content": "hi"}]), candidates))
+
+
+def test_moderation_guard_fails_closed_when_configured():
+    g = _guard(fail_closed=True)
+
+    async def boom(text):
+        raise RuntimeError("api is down")
+    g._call_api = boom
+    with pytest.raises(Veto):
+        run(g.apply(ctx(messages=[{"role": "user", "content": "hi"}]), cands(dep("a"))))
+
+
+def test_moderation_guard_real_call_api_parses_the_apis_response_shape():
+    """Exercises the real `_call_api` (not the monkeypatch the other tests use above) against a
+    fake httpx client, to prove it parses OpenAI's actual response shape correctly -- both the
+    overall `flagged` boolean and the per-category score threshold override."""
+    class FakeResponse:
+        def __init__(self, body):
+            self._body = body
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._body
+
+    class FakeClient:
+        def __init__(self, body):
+            self._body = body
+
+        async def post(self, *a, **kw):
+            return FakeResponse(self._body)
+
+    g = _guard(thresholds={"violence": 0.3})
+    g._client = FakeClient({"results": [{"flagged": False, "category_scores": {"violence": 0.5}}]})
+    assert run(g._call_api("some violent text")) is True  # under no built-in flag, but over our threshold
+
+    g._client = FakeClient({"results": [{"flagged": True, "category_scores": {}}]})
+    assert run(g._call_api("flagged text")) is True  # the API's own flag alone is enough
+
+    g._client = FakeClient({"results": [{"flagged": False, "category_scores": {"violence": 0.1}}]})
+    assert run(g._call_api("benign text")) is False
+
+
+def test_moderation_guard_rejects_bad_on_match_value():
+    with pytest.raises(ValueError):
+        ModerationGuard().configure(api_key="x", on_match="nope")

@@ -108,3 +108,22 @@ def test_read_chain_mode_falls_back_on_a_bad_value(tmp_path):
 
 def test_read_chain_mode_falls_back_when_file_is_missing(tmp_path):
     assert read_chain_mode(str(tmp_path / "nope.yaml")) == "enforce"
+
+
+def test_a_plugins_own_configure_error_becomes_a_chainconfigerror(tmp_path):
+    write(tmp_path, "badplugin.py", """
+from chainroute import RoutingPlugin
+
+class BadConfig(RoutingPlugin):
+    def configure(self, on_match="veto"):
+        if on_match not in ("veto", "exclude"):
+            raise ValueError("bad on_match: %r" % on_match)
+""")
+    f = write(tmp_path, "chain.yaml", """
+plugins:
+  - use: badplugin.BadConfig
+    with:
+      on_match: sideways
+""")
+    with pytest.raises(ChainConfigError, match="failed to configure"):
+        load_chain(str(f))
