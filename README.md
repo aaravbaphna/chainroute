@@ -39,6 +39,36 @@ plugins:
 restart anything — it loads every plugin and cross-checks anything KeywordRoute references
 against the deployments you've actually configured.
 
+## Dry-running a chain against sample prompts
+
+`chainroute simulate` runs a chain against a batch of prompts and reports what it would have
+decided for each one — no proxy, no LLM calls, no cost:
+
+```bash
+echo '"this is urgent, please help"' > prompts.jsonl
+echo '"my ssn is 123-45-6789"' >> prompts.jsonl
+chainroute simulate --config config.yaml --group chat --chain chain.yaml --prompts prompts.jsonl
+```
+
+```
+[1] 'this is urgent, please help'
+  pin claude-sonnet-4 (keyword match: prefers claude-sonnet-4)
+    openai/gpt-4o-mini        eligible
+    anthropic/claude-sonnet-4 PINNED
+
+[2] 'my ssn is 123-45-6789'
+  narrowed to 1/2
+    openai/gpt-4o-mini        EXCLUDED - looks like sensitive data; only ['azure'] are trusted
+    anthropic/claude-sonnet-4 eligible
+```
+
+Each line in the prompts file is either a plain JSON string (shorthand for a one-message
+conversation) or a full object — `{"messages": [...], "session_id": "...", "metadata": {...}}` —
+for testing session-aware plugins like `StickySession`. Add `--json` for one JSON result object
+per line instead, to feed into a script. If a plugin in the chain calls a real API (see
+`ModerationGuard`), simulate calls it for real too — that's the point, seeing real results
+without spending anything on the LLM call itself.
+
 ## Shadow mode
 
 Before a new plugin or chain can affect real traffic, you can run it in shadow mode: every
