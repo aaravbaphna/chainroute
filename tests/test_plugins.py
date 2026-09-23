@@ -3,6 +3,7 @@ import time
 
 import pytest
 
+from chainroute.plugins.bandit import BanditRouter
 from chainroute.plugins.budget_guard import BudgetGuard
 from chainroute.plugins.canary import WeightedCanary
 from chainroute.plugins.keyword import KeywordRoute
@@ -345,3 +346,126 @@ def test_moderation_guard_real_call_api_parses_the_apis_response_shape():
 def test_moderation_guard_rejects_bad_on_match_value():
     with pytest.raises(ValueError):
         ModerationGuard().configure(api_key="x", on_match="nope")
+
+
+# ---------------------------------------------------------------- BanditRouter
+def winner(candidates):
+    """BanditRouter expresses its choice as the unique top-scoring candidate (bias, not
+    exclude -- see the module docstring for why), so "who won" means "who has the max score",
+    the same thing Chain's own merge rule checks."""
+    return max(candidates, key=lambda c: c.score).model
+
+
+def test_bandit_noop_with_zero_or_one_eligible_candidate():
+    p = BanditRouter()
+    p.configure(seed=1)
+    single = cands(dep("a", model="only"))
+    run(p.apply(ctx(), single))
+    assert single[0].score == 0
+
+
+def test_bandit_tries_every_arm_before_exploiting():
+    p = BanditRouter()
+    p.configure(seed=1)
+    seen = set()
+    for _ in range(3):
+        candidates = cands(dep("a", model="x"), dep("b", model="y"), dep("c", model="z"))
+        run(p.apply(ctx(), candidates))
+        seen.add(winner(candidates))
+    assert seen == {"x", "y", "z"}  # each untried arm gets picked before any repeats
+
+
+def test_bandit_exploits_the_best_arm_once_warmed_up():
+    p = BanditRouter()
+    p.configure(seed=1, epsilon=0.0)  # no exploration: purely greedy after warmup
+    run(p.on_success(ctx(), Candidate(id="a", model="x", provider="p", deployment={}), cost=0.0))  # reward 1.0
+    run(p.on_failure(ctx(), Candidate(id="b", model="y", provider="p", deployment={}), "Error"))    # reward 0.0
+    for _ in range(10):
+        candidates = cands(dep("a", model="x"), dep("b", model="y"))
+        run(p.apply(ctx(), candidates))
+        assert winner(candidates) == "x"
+
+
+def test_bandit_optimize_for_cost_prefers_the_cheaper_arm():
+    p = BanditRouter()
+    p.configure(seed=1, epsilon=0.0, optimize_for="cost")
+    run(p.on_success(ctx(), Candidate(id="a", model="cheap", provider="p", deployment={}), cost=0.01))
+    run(p.on_success(ctx(), Candidate(id="b", model="pricey", provider="p", deployment={}), cost=1.00))
+    candidates = cands(dep("a", model="cheap"), dep("b", model="pricey"))
+    run(p.apply(ctx(), candidates))
+    assert winner(candidates) == "cheap"
+
+
+def test_bandit_failure_counts_against_an_arm_under_cost_optimization():
+    p = BanditRouter()
+    p.configure(seed=1, epsilon=0.0, optimize_for="cost")
+    run(p.on_success(ctx(), Candidate(id="a", model="flaky", provider="p", deployment={}), cost=0.50))
+    run(p.on_failure(ctx(), Candidate(id="a", model="flaky", provider="p", deployment={}), "Error"))
+    run(p.on_success(ctx(), Candidate(id="b", model="reliable", provider="p", deployment={}), cost=0.50))
+    candidates = cands(dep("a", model="flaky"), dep("b", model="reliable"))
+    run(p.apply(ctx(), candidates))
+    # "flaky" has a failure (reward -1.0) dragging its mean below "reliable"'s single -0.5 success
+    assert winner(candidates) == "reliable"
+
+
+def test_bandit_losers_keep_a_reason_even_though_theyre_not_excluded():
+    p = BanditRouter()
+    p.configure(seed=1, epsilon=0.0)
+    run(p.on_success(ctx(), Candidate(id="a", model="x", provider="p", deployment={}), cost=0.0))
+    run(p.on_failure(ctx(), Candidate(id="b", model="y", provider="p", deployment={}), "Error"))
+    candidates = cands(dep("a", model="x"), dep("b", model="y"))
+    run(p.apply(ctx(), candidates))
+    loser = next(c for c in candidates if c.model != winner(candidates))
+    assert not loser.excluded and loser.reason is not None and "behind" in loser.reason
+
+
+def test_bandit_epsilon_explores_a_worse_arm_sometimes():
+    p = BanditRouter()
+    p.configure(seed=7, epsilon=1.0)  # always explore
+    run(p.on_success(ctx(), Candidate(id="a", model="x", provider="p", deployment={}), cost=0.0))
+    run(p.on_failure(ctx(), Candidate(id="b", model="y", provider="p", deployment={}), "Error"))
+    picks = set()
+    for _ in range(20):
+        candidates = cands(dep("a", model="x"), dep("b", model="y"))
+        run(p.apply(ctx(), candidates))
+        picks.add(winner(candidates))
+    assert picks == {"x", "y"}  # with epsilon=1.0, both arms get picked over enough tries
+
+
+def test_bandit_is_deterministic_given_the_same_seed():
+    def run_sequence(seed):
+        p = BanditRouter()
+        p.configure(seed=seed, epsilon=0.5)
+        picks = []
+        for _ in range(15):
+            candidates = cands(dep("a", model="x"), dep("b", model="y"), dep("c", model="z"))
+            run(p.apply(ctx(), candidates))
+            picks.append(winner(candidates))
+            run(p.on_success(ctx(), Candidate(id="?", model=picks[-1], provider="p", deployment={}), cost=0.1))
+        return picks
+    assert run_sequence(99) == run_sequence(99)
+
+
+def test_bandit_composes_with_a_pin_from_another_plugin():
+    """The reason bias, not exclude (see the module docstring): StickySession's pin from an
+    earlier turn must keep winning even once the bandit's own preference has moved on."""
+    from chainroute.plugins.sticky_session import StickySession
+    bandit = BanditRouter()
+    bandit.configure(seed=1, epsilon=0.0)
+    bandit._arms = {"x": {"n": 5, "mean": 0.0}, "y": {"n": 5, "mean": 1.0}}  # bandit now prefers "y"
+    sticky = StickySession()
+    sticky.configure()
+    session_ctx = ctx(session_id="s1")
+    run(sticky.on_success(session_ctx, cands(dep("a", model="x"))[0]))  # session's first turn used "x"
+
+    for plugins in ([bandit, sticky], [sticky, bandit]):  # composition must not depend on order
+        candidates = cands(dep("a", model="x"), dep("b", model="y"))
+        turn_ctx = ctx(session_id="s1")
+        for plugin in plugins:
+            run(plugin.apply(turn_ctx, candidates))
+        assert turn_ctx._pinned is not None and turn_ctx._pinned.model == "x"
+
+
+def test_bandit_rejects_bad_optimize_for_value():
+    with pytest.raises(ValueError):
+        BanditRouter().configure(optimize_for="latency")

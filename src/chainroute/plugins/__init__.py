@@ -1,5 +1,6 @@
 """Built-in plugins. Each is small enough to read in a minute and use as a template for your
 own — see the README's "writing a plugin" section for a from-scratch walkthrough."""
+from .bandit import BanditRouter
 from .budget_guard import BudgetGuard
 from .canary import WeightedCanary
 from .keyword import KeywordRoute
@@ -16,7 +17,8 @@ BUILTINS = {
     "chainroute.plugins.budget_guard.BudgetGuard": BudgetGuard,
     "chainroute.plugins.sensitive_data.SensitiveDataGuard": SensitiveDataGuard,
     "chainroute.plugins.moderation.ModerationGuard": ModerationGuard,
+    "chainroute.plugins.bandit.BanditRouter": BanditRouter,
 }
 
-__all__ = ["BUILTINS", "BudgetGuard", "WeightedCanary", "KeywordRoute", "ModerationGuard",
-           "SensitiveDataGuard", "StickySession", "TagAffinity"]
+__all__ = ["BUILTINS", "BanditRouter", "BudgetGuard", "WeightedCanary", "KeywordRoute",
+           "ModerationGuard", "SensitiveDataGuard", "StickySession", "TagAffinity"]

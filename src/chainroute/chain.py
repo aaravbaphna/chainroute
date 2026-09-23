@@ -111,14 +111,20 @@ class Chain:
     async def explain(self, ctx: RouteContext, deployments: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Runs the chain exactly as `apply()` would, but always returns the full verdict
         regardless of mode, and never enforces anything -- for `chainroute simulate` and any
-        other "what would this chain do" tooling built on top of chainroute."""
-        _, desc, veto, candidates = await self._decide(ctx, deployments)
+        other "what would this chain do" tooling built on top of chainroute.
+
+        `survived` is the actual merge outcome for each candidate -- not just "not excluded":
+        a plugin that only biases (see BanditRouter) narrows the field by score without ever
+        setting `excluded`, so `survived` is what tells you it lost anyway."""
+        result, desc, veto, candidates = await self._decide(ctx, deployments)
+        survivor_ids = {(d.get("model_info") or {}).get("id") for d in result}
         return {
             "decision": desc,
             "veto": str(veto) if veto else None,
             "candidates": [
-                {"model": c.model, "provider": c.provider, "excluded": c.excluded,
-                 "reason": c.reason, "score": c.score, "pinned": ctx._pinned is not None and c.id == ctx._pinned.id}
+                {"model": c.model, "provider": c.provider, "excluded": c.excluded, "reason": c.reason,
+                 "score": c.score, "survived": c.id in survivor_ids,
+                 "pinned": ctx._pinned is not None and c.id == ctx._pinned.id}
                 for c in candidates
             ],
         }
