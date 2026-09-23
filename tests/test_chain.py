@@ -226,3 +226,22 @@ def test_explain_is_the_same_regardless_of_chain_mode():
     enforce_out = asyncio.run(Chain([Rejects()], mode="enforce").explain(ctx(), [dep("a")]))
     shadow_out = asyncio.run(Chain([Rejects()], mode="shadow").explain(ctx(), [dep("a")]))
     assert enforce_out["veto"] == shadow_out["veto"] == "nope"
+
+
+def test_explain_survived_reflects_the_real_merge_outcome_not_just_excluded():
+    """A bias-only plugin (BanditRouter's shape) narrows the field by score without ever
+    setting `excluded` -- `survived` must still say the loser didn't make it."""
+    out = asyncio.run(Chain([Bias("a", 1.0)]).explain(ctx(), [dep("a"), dep("b")]))
+    a, b = out["candidates"]
+    assert a["survived"] and not a["excluded"]
+    assert not b["survived"] and not b["excluded"]  # lost by score, not by exclusion
+
+
+def test_explain_survived_is_true_for_everyone_on_passthrough():
+    out = asyncio.run(Chain([]).explain(ctx(), [dep("a"), dep("b")]))
+    assert all(c["survived"] for c in out["candidates"])
+
+
+def test_explain_survived_is_false_for_everyone_on_veto():
+    out = asyncio.run(Chain([Rejects()]).explain(ctx(), [dep("a"), dep("b")]))
+    assert not any(c["survived"] for c in out["candidates"])

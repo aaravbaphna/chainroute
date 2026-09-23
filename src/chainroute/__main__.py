@@ -244,9 +244,21 @@ def _simulate(litellm_config: str, group: str, chain_path: str, prompts_path: st
         names = ["%s/%s" % (c["provider"], c["model"]) for c in result["candidates"]]
         width = max((len(n) for n in names), default=0)
         for name, c in zip(names, result["candidates"]):
-            tag = "PINNED" if c["pinned"] else ("EXCLUDED - %s" % c["reason"] if c["excluded"] else "eligible")
-            print("    %-*s %s" % (width, name, tag))
+            print("    %-*s %s" % (width, name, _candidate_tag(c)))
         print()
+
+
+def _candidate_tag(c: Dict[str, Any]) -> str:
+    """A plugin that only biases (BanditRouter, WeightedCanary) narrows the field by score
+    without ever setting `excluded` -- so this checks `survived`, not just `excluded`/`pinned`,
+    or a losing bias-only candidate would misleadingly print as plain "eligible"."""
+    if c["pinned"]:
+        return "PINNED" + (" - %s" % c["reason"] if c["reason"] else "")
+    if c["excluded"]:
+        return "EXCLUDED - %s" % c["reason"]
+    if not c["survived"]:
+        return "NOT SELECTED" + (" - %s" % c["reason"] if c["reason"] else "")
+    return ("SELECTED - %s" % c["reason"]) if c["reason"] else "eligible"
 
 
 def main(argv=None) -> None:

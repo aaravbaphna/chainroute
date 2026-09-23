@@ -9,6 +9,7 @@ import pytest
 from litellm import Router
 
 from chainroute.callback import ChainRoute
+from chainroute.plugins.bandit import BanditRouter
 from chainroute.plugins.budget_guard import BudgetGuard
 from chainroute.plugins.keyword import KeywordRoute
 from chainroute.plugins.moderation import ModerationGuard
@@ -265,3 +266,29 @@ def test_moderation_guard_fails_open_end_to_end_when_the_api_errors(lens_factory
         return await r.acompletion(model="chat", messages=[{"role": "user", "content": "hi"}])
     resp = asyncio.run(go())
     assert resp.model == "ok"
+
+
+def test_bandit_router_prefers_the_learned_winner_end_to_end(lens_factory):
+    # The learning itself (on_success/on_failure updating an arm's running reward) is already
+    # covered thoroughly in test_plugins.py, in isolation. Priming it directly here -- rather
+    # than warming it up through real failing calls -- sidesteps the same background
+    # logging-worker lag documented on the BudgetGuard test above; what's actually novel enough
+    # to need a real Router for is proving the *real* async_filter_deployments hook enforces the
+    # bandit's exclude-based choice against the deployment that would otherwise still be eligible.
+    bandit = BanditRouter()
+    bandit.configure(seed=3, epsilon=0.0)  # purely greedy: no exploration once every arm is known
+    bandit._arms = {"good": {"n": 5, "mean": 1.0}, "bad": {"n": 5, "mean": 0.0}}
+    lens_factory([bandit])
+    r = Router(model_list=[
+        {"model_name": "chat", "litellm_params": {"model": "openai/good", "api_key": "x", "mock_response": "ok"}},
+        {"model_name": "chat", "litellm_params": {"model": "openai/bad", "api_key": "x",
+                                                   "mock_response": "litellm.RateLimitError"}},
+    ], num_retries=0, routing_strategy="simple-shuffle")
+
+    async def go():
+        return [await r.acompletion(model="chat", messages=[{"role": "user", "content": "hi"}])
+                for _ in range(8)]
+    resps = asyncio.run(go())
+    # "bad" would raise RateLimitError if ever selected -- every one of these succeeding at all
+    # already proves the bandit's choice (not simple-shuffle's default randomness) is what wins.
+    assert all(resp.model == "good" for resp in resps)

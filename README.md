@@ -122,8 +122,30 @@ Run `chainroute list` for the live list with descriptions. As of this writing:
 | `WeightedCanary` | Sends a fixed, deterministic percentage of traffic to a candidate model — the same session always lands on the same side of the split. |
 | `BudgetGuard` | Steers a caller toward a cheap allow-list once their spend crosses a cap in a rolling window; fails open if nothing cheap is eligible. |
 | `ModerationGuard` | Checks the latest message against OpenAI's moderation endpoint; restricts to trusted providers (or rejects) when flagged. Fails open by default if the API errors or times out — see below. |
+| `BanditRouter` | An epsilon-greedy multi-armed bandit across every deployment in the group: tries each at least once, then adaptively shifts traffic toward whichever is empirically winning (by success rate or by cost), while still exploring occasionally. |
 
 Each is under 60 lines — read one as a template before writing your own.
+
+`BanditRouter` is `WeightedCanary`'s fixed split turned adaptive: instead of a percentage you
+set once, it learns from real `on_success`/`on_failure` outcomes which deployment is actually
+performing best, and routes more traffic there over time. It optimizes across a whole group's
+worth of *aggregate* traffic, not any one conversation, so it doesn't try to keep a session
+consistent the way `WeightedCanary` does — add `StickySession` to the same chain (either order)
+if you also want a session pinned to whatever the bandit picked for its first turn:
+
+```yaml
+plugins:
+  - use: chainroute.plugins.bandit.BanditRouter
+    with: {optimize_for: cost}
+  - use: chainroute.plugins.sticky_session.StickySession
+```
+
+That composes correctly (the pin keeps winning even as the bandit's own preference drifts)
+*because* `BanditRouter` expresses its choice as a `bias`, not an `exclude` — a pin always wins
+over a bias at merge time, regardless of which plugin ran first. If you're writing a plugin
+meant to express a mere *preference* rather than a hard rule, prefer `bias` over `exclude` for
+the same reason: it's what lets it compose with something else's pin instead of silently
+overriding it.
 
 `ModerationGuard` is the first plugin that calls a real external API rather than a local check,
 and needed no extra reliability code of its own to do it safely — it just relies on the timeout

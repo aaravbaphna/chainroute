@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from chainroute.__main__ import _deployments_for_group, _read_prompts, _simulate
+from chainroute.__main__ import _candidate_tag, _deployments_for_group, _read_prompts, _simulate
 
 
 def write(path, content):
@@ -99,3 +99,34 @@ def test_simulate_exits_clearly_for_an_unknown_group(fixture_files):
     config, chain, prompts = fixture_files
     with pytest.raises(SystemExit):
         _simulate(config, "no-such-group", chain, prompts, as_json=False)
+
+
+def _cand(**kw):
+    base = {"model": "m", "provider": "p", "excluded": False, "reason": None, "score": 0.0,
+            "survived": True, "pinned": False}
+    base.update(kw)
+    return base
+
+
+def test_candidate_tag_pinned():
+    assert _candidate_tag(_cand(pinned=True, reason="why")) == "PINNED - why"
+
+
+def test_candidate_tag_excluded():
+    assert _candidate_tag(_cand(excluded=True, reason="why")) == "EXCLUDED - why"
+
+
+def test_candidate_tag_not_selected_by_score_with_no_reason():
+    assert _candidate_tag(_cand(survived=False)) == "NOT SELECTED"
+
+
+def test_candidate_tag_not_selected_by_score_with_a_reason():
+    assert _candidate_tag(_cand(survived=False, reason="losing")) == "NOT SELECTED - losing"
+
+
+def test_candidate_tag_selected_with_a_reason():
+    assert _candidate_tag(_cand(survived=True, reason="winning")) == "SELECTED - winning"
+
+
+def test_candidate_tag_plain_eligible():
+    assert _candidate_tag(_cand()) == "eligible"
