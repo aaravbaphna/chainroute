@@ -195,3 +195,34 @@ def test_on_success_and_on_failure_reach_every_plugin():
         ("one", "success", "a", 0.01), ("two", "success", "a", 0.01),
         ("one", "failure", "a", "RateLimitError"), ("two", "failure", "a", "RateLimitError"),
     ]
+
+
+def test_explain_reports_passthrough_with_no_opinion():
+    out = asyncio.run(Chain([]).explain(ctx(), [dep("a"), dep("b")]))
+    assert out["decision"] == "no opinion (passthrough)" and out["veto"] is None
+    assert [c["excluded"] for c in out["candidates"]] == [False, False]
+
+
+def test_explain_reports_which_candidate_was_excluded_and_why():
+    out = asyncio.run(Chain([Exclude("a")]).explain(ctx(), [dep("a"), dep("b")]))
+    a, b = out["candidates"]
+    assert a["excluded"] and a["reason"] == "test exclusion"
+    assert not b["excluded"]
+
+
+def test_explain_reports_a_pin():
+    out = asyncio.run(Chain([Pin("a")]).explain(ctx(), [dep("a"), dep("b")]))
+    a, b = out["candidates"]
+    assert a["pinned"] and not b["pinned"]
+    assert out["decision"].startswith("pin ")
+
+
+def test_explain_reports_a_veto_without_raising():
+    out = asyncio.run(Chain([Rejects()]).explain(ctx(), [dep("a")]))
+    assert out["veto"] == "nope" and "vetoed" in out["decision"]
+
+
+def test_explain_is_the_same_regardless_of_chain_mode():
+    enforce_out = asyncio.run(Chain([Rejects()], mode="enforce").explain(ctx(), [dep("a")]))
+    shadow_out = asyncio.run(Chain([Rejects()], mode="shadow").explain(ctx(), [dep("a")]))
+    assert enforce_out["veto"] == shadow_out["veto"] == "nope"

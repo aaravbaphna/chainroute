@@ -4,14 +4,18 @@
     chainroute list                                      show the built-in plugins
     chainroute install --config config.yaml [--patch]    wire ChainRoute into a LiteLLM proxy config
     chainroute check --config config.yaml [--chain ...]   validate a chain against a litellm config
+    chainroute simulate --config c.yaml --group g --prompts p.jsonl   dry-run a chain, no LLM calls
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import re
 import shutil
 import sys
 from pathlib import Path
+from typing import Any, Dict, Iterator, List
 
 import yaml
 
@@ -132,6 +136,29 @@ def _list_plugins() -> None:
         print("%s\n  %s\n" % (dotted, " ".join(para) or "(no description)"))
 
 
+def _read_litellm_config(litellm_config: str) -> Dict[str, Any]:
+    cfg_path = Path(litellm_config)
+    if not cfg_path.exists():
+        sys.exit("litellm config not found: %s" % cfg_path)
+    return yaml.safe_load(cfg_path.read_text()) or {}
+
+
+def _model_list(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [m for m in (doc.get("model_list") or []) if isinstance(m, dict)]
+
+
+def _deployments_for_group(doc: Dict[str, Any], group: str) -> List[Dict[str, Any]]:
+    """The raw litellm-shaped deployment dicts for one model_name -- what Chain.explain() (and,
+    in the real proxy, async_filter_deployments) actually operates on. `model_info.id` is
+    synthesized if the config didn't set one; it only needs to be stable within one simulate run."""
+    out = []
+    for i, m in enumerate(d for d in _model_list(doc) if d.get("model_name") == group):
+        info = dict(m.get("model_info") or {})
+        info.setdefault("id", "sim-%d" % i)
+        out.append({"litellm_params": m.get("litellm_params") or {}, "model_info": info})
+    return out
+
+
 def _check(litellm_config: str, chain_path: str) -> None:
     from .loader import ChainConfigError, load_chain
 
@@ -143,17 +170,13 @@ def _check(litellm_config: str, chain_path: str) -> None:
     for p in plugins:
         print("  - %s" % p.name)
 
-    cfg_path = Path(litellm_config)
-    if not cfg_path.exists():
-        sys.exit("litellm config not found: %s" % cfg_path)
-    doc = yaml.safe_load(cfg_path.read_text()) or {}
-    model_list = [m for m in (doc.get("model_list") or []) if isinstance(m, dict)]
-    groups = {m.get("model_name") for m in model_list}
-    models_by_group: dict = {}
-    for m in model_list:
+    doc = _read_litellm_config(litellm_config)
+    groups = {m.get("model_name") for m in _model_list(doc)}
+    models_by_group: Dict[Any, set] = {}
+    for m in _model_list(doc):
         lp = m.get("litellm_params") or {}
         models_by_group.setdefault(m.get("model_name"), set()).add(str(lp.get("model", "")).rsplit("/", 1)[-1])
-    print("\nModel groups in %s:" % cfg_path.name)
+    print("\nModel groups in %s:" % Path(litellm_config).name)
     for g in sorted(g for g in groups if g):
         print("  %s: %s" % (g, sorted(models_by_group.get(g, []))))
 
@@ -164,6 +187,66 @@ def _check(litellm_config: str, chain_path: str) -> None:
         print("\nWARNING: KeywordRoute references model(s) not present in any deployment: %s" % sorted(missing))
     elif referenced:
         print("\nEvery model KeywordRoute references exists in the litellm config.")
+
+
+def _read_prompts(path: str) -> Iterator[Dict[str, Any]]:
+    """One JSON value per line: a plain string is shorthand for {"messages": [{"role": "user",
+    "content": <that string>}]}; an object can also set metadata/session_id for a fuller test."""
+    with open(path) as f:
+        for lineno, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as e:
+                sys.exit("%s:%d is not valid JSON: %s" % (path, lineno, e))
+            if isinstance(value, str):
+                yield {"messages": [{"role": "user", "content": value}]}
+            elif isinstance(value, dict) and "messages" in value:
+                yield value
+            else:
+                sys.exit("%s:%d must be a string or an object with a `messages` key" % (path, lineno))
+
+
+def _simulate(litellm_config: str, group: str, chain_path: str, prompts_path: str, as_json: bool) -> None:
+    from .loader import ChainConfigError, load_chain
+    from .chain import Chain
+    from .types import RouteContext
+
+    try:
+        chain = Chain(load_chain(chain_path))
+    except ChainConfigError as e:
+        sys.exit("chain error: %s" % e)
+
+    doc = _read_litellm_config(litellm_config)
+    deployments = _deployments_for_group(doc, group)
+    if not deployments:
+        sys.exit("no deployments under model_name '%s' in %s" % (group, litellm_config))
+
+    async def run_one(prompt: Dict[str, Any]) -> Dict[str, Any]:
+        ctx = RouteContext(model_group=group, requested_model=group, messages=prompt.get("messages"),
+                            metadata=prompt.get("metadata") or {}, session_id=prompt.get("session_id"))
+        return await chain.explain(ctx, deployments)
+
+    for i, prompt in enumerate(_read_prompts(prompts_path), start=1):
+        result = asyncio.run(run_one(prompt))
+        if as_json:
+            print(json.dumps({"i": i, "prompt": prompt, **result}))
+            continue
+        text = next((m.get("content", "") for m in reversed(prompt.get("messages") or [])
+                     if m.get("role") == "user"), "")
+        print("[%d] %r" % (i, text[:100]))
+        if result["veto"]:
+            print("  VETO: %s" % result["veto"])
+        else:
+            print("  %s" % result["decision"])
+        names = ["%s/%s" % (c["provider"], c["model"]) for c in result["candidates"]]
+        width = max((len(n) for n in names), default=0)
+        for name, c in zip(names, result["candidates"]):
+            tag = "PINNED" if c["pinned"] else ("EXCLUDED - %s" % c["reason"] if c["excluded"] else "eligible")
+            print("    %-*s %s" % (width, name, tag))
+        print()
 
 
 def main(argv=None) -> None:
@@ -183,6 +266,13 @@ def main(argv=None) -> None:
     chk.add_argument("--config", required=True, help="the litellm proxy config.yaml")
     chk.add_argument("--chain", default="chain.yaml")
 
+    sim = sub.add_parser("simulate", help="dry-run a chain against sample prompts, no LLM calls")
+    sim.add_argument("--config", required=True, help="the litellm proxy config.yaml, for its deployments")
+    sim.add_argument("--group", required=True, help="the model_name (group) to simulate against")
+    sim.add_argument("--chain", default="chain.yaml")
+    sim.add_argument("--prompts", required=True, help="a JSONL file: one string or {messages: [...]} per line")
+    sim.add_argument("--json", action="store_true", dest="as_json", help="one JSON result object per line")
+
     args = p.parse_args(argv)
     if args.cmd == "install":
         _install(args.config, args.patch)
@@ -192,6 +282,8 @@ def main(argv=None) -> None:
         _list_plugins()
     elif args.cmd == "check":
         _check(args.config, args.chain)
+    elif args.cmd == "simulate":
+        _simulate(args.config, args.group, args.chain, args.prompts, args.as_json)
 
 
 if __name__ == "__main__":

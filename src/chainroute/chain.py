@@ -74,9 +74,9 @@ class Chain:
             return False
 
     async def _decide(self, ctx: RouteContext, deployments: List[Dict[str, Any]]
-                       ) -> Tuple[List[Dict[str, Any]], str, Optional[Veto]]:
+                       ) -> Tuple[List[Dict[str, Any]], str, Optional[Veto], List[Candidate]]:
         """Runs every plugin and computes the merge result, whether or not it's the one that
-        actually gets enforced. Returns (result, description, veto-if-any)."""
+        actually gets enforced. Returns (result, description, veto-if-any, final candidates)."""
         candidates = [_candidate_from_deployment(d) for d in deployments]
         by_id = {c.id: c for c in candidates}
         veto: Optional[Veto] = None
@@ -88,26 +88,43 @@ class Chain:
                 veto = v
                 break  # a vetoing plugin's own verdict is final; later plugins don't get a say
         if veto is not None:
-            return [], "would veto: %s" % veto if self.mode == "shadow" else "vetoed: %s" % veto, veto
+            desc = ("would veto: %s" % veto) if self.mode == "shadow" else ("vetoed: %s" % veto)
+            return [], desc, veto, candidates
 
         pinned = ctx._pinned
         if pinned is not None and pinned.id in by_id and not by_id[pinned.id].excluded:
-            return [by_id[pinned.id].deployment], "pin %s (%s)" % (pinned.model, ctx._pin_reason), None
+            return [by_id[pinned.id].deployment], "pin %s (%s)" % (pinned.model, ctx._pin_reason), None, candidates
 
         survivors = [c for c in candidates if not c.excluded]
         if not survivors:
-            return [], "excluded every candidate", None
+            return [], "excluded every candidate", None, candidates
 
         if any(c.score != 0 for c in survivors):
             top = max(c.score for c in survivors)
             survivors = [c for c in survivors if c.score == top]
 
         if len(survivors) == len(candidates) and all(c.score == 0 for c in candidates):
-            return deployments, "no opinion (passthrough)", None  # untouched: the original objects, not copies
-        return [c.deployment for c in survivors], "narrowed to %d/%d" % (len(survivors), len(candidates)), None
+            return deployments, "no opinion (passthrough)", None, candidates  # untouched objects, not copies
+        return ([c.deployment for c in survivors], "narrowed to %d/%d" % (len(survivors), len(candidates)),
+                None, candidates)
+
+    async def explain(self, ctx: RouteContext, deployments: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Runs the chain exactly as `apply()` would, but always returns the full verdict
+        regardless of mode, and never enforces anything -- for `chainroute simulate` and any
+        other "what would this chain do" tooling built on top of chainroute."""
+        _, desc, veto, candidates = await self._decide(ctx, deployments)
+        return {
+            "decision": desc,
+            "veto": str(veto) if veto else None,
+            "candidates": [
+                {"model": c.model, "provider": c.provider, "excluded": c.excluded,
+                 "reason": c.reason, "score": c.score, "pinned": ctx._pinned is not None and c.id == ctx._pinned.id}
+                for c in candidates
+            ],
+        }
 
     async def apply(self, ctx: RouteContext, deployments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        result, desc, veto = await self._decide(ctx, deployments)
+        result, desc, veto, _ = await self._decide(ctx, deployments)
         if self.mode == "shadow":
             if desc != "no opinion (passthrough)":
                 # WARNING, not INFO: shadow mode's entire point is watching what it would have
