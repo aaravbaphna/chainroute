@@ -86,8 +86,17 @@ def load_chain(path: str) -> List[RoutingPlugin]:
         cls = _resolve(str(entry["use"]), p.parent)
         if not (isinstance(cls, type) and issubclass(cls, RoutingPlugin)):
             raise ChainConfigError("%s is not a RoutingPlugin subclass" % entry["use"])
-        instance = cls()
-        instance.configure(**(entry.get("with") or {}))
+        try:
+            instance = cls()
+            instance.configure(**(entry.get("with") or {}))
+        except ChainConfigError:
+            raise
+        except Exception as e:
+            # A plugin's own configure() can raise for a bad `with:` value (see
+            # SensitiveDataGuard's on_match check) -- without this, that's an uncaught exception
+            # all the way up through ChainRoute.__init__, which would crash proxy *startup*
+            # entirely rather than degrading to the empty-chain fallback callback.py already has.
+            raise ChainConfigError("%s failed to configure: %r" % (entry["use"], e)) from e
         if instance.name is None:
             instance.name = cls.__name__
         if "timeout_s" in entry:

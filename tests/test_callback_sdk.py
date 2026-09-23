@@ -11,6 +11,7 @@ from litellm import Router
 from chainroute.callback import ChainRoute
 from chainroute.plugins.budget_guard import BudgetGuard
 from chainroute.plugins.keyword import KeywordRoute
+from chainroute.plugins.moderation import ModerationGuard
 from chainroute.plugins.sensitive_data import SensitiveDataGuard
 from chainroute.plugins.sticky_session import StickySession
 from chainroute.types import RoutingPlugin, Veto
@@ -224,4 +225,43 @@ def test_a_hung_plugin_does_not_block_the_request_end_to_end(lens_factory):
         return await asyncio.wait_for(
             r.acompletion(model="chat", messages=[{"role": "user", "content": "hi"}]), timeout=2.0)
     resp = asyncio.run(go())  # would time out at 2s (the outer wait_for) if the 10s sleep weren't bounded
+    assert resp.model == "ok"
+
+
+def test_moderation_guard_excludes_flagged_content_end_to_end(lens_factory):
+    guard = ModerationGuard()
+    guard.configure(api_key="test-key", trusted_providers=["azure"], on_match="exclude")
+
+    async def flagged(text):
+        return True
+    guard._call_api = flagged
+    lens_factory([guard])
+    r = Router(model_list=[
+        {"model_name": "chat", "litellm_params": {"model": "openai/normal", "api_key": "x", "mock_response": "n"}},
+        {"model_name": "chat", "litellm_params": {"model": "azure/safe", "api_key": "x", "mock_response": "s",
+                                                   "custom_llm_provider": "azure"}},
+    ])
+
+    async def go():
+        return await r.acompletion(model="chat", messages=[{"role": "user", "content": "bad stuff"}])
+    resp = asyncio.run(go())
+    assert resp.model == "safe"
+
+
+def test_moderation_guard_fails_open_end_to_end_when_the_api_errors(lens_factory):
+    guard = ModerationGuard()
+    guard.configure(api_key="test-key", on_match="veto")
+
+    async def boom(text):
+        raise RuntimeError("moderation api is down")
+    guard._call_api = boom
+    lens_factory([guard])  # ChainRoute's default (enforce) mode -- Chain's own isolation, not the
+    # plugin's, is what makes this fail open; see chain.py and the "fails open by default" unit test.
+    r = Router(model_list=[
+        {"model_name": "chat", "litellm_params": {"model": "openai/ok", "api_key": "x", "mock_response": "ok"}},
+    ])
+
+    async def go():
+        return await r.acompletion(model="chat", messages=[{"role": "user", "content": "hi"}])
+    resp = asyncio.run(go())
     assert resp.model == "ok"

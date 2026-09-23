@@ -91,8 +91,16 @@ Run `chainroute list` for the live list with descriptions. As of this writing:
 | `TagAffinity` | Keeps only deployments tagged for a request's `metadata.tags`. |
 | `WeightedCanary` | Sends a fixed, deterministic percentage of traffic to a candidate model — the same session always lands on the same side of the split. |
 | `BudgetGuard` | Steers a caller toward a cheap allow-list once their spend crosses a cap in a rolling window; fails open if nothing cheap is eligible. |
+| `ModerationGuard` | Checks the latest message against OpenAI's moderation endpoint; restricts to trusted providers (or rejects) when flagged. Fails open by default if the API errors or times out — see below. |
 
 Each is under 60 lines — read one as a template before writing your own.
+
+`ModerationGuard` is the first plugin that calls a real external API rather than a local check,
+and needed no extra reliability code of its own to do it safely — it just relies on the timeout
+and isolation every plugin already gets (see [Timeouts](#timeouts) above). The one thing worth
+choosing deliberately for a *compliance* plugin specifically: `fail_closed: true` vetoes a
+request rather than letting it through unmoderated if the API call itself fails, since chainroute's
+usual fail-open default isn't always the right call for this one.
 
 ## Writing a plugin
 
